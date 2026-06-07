@@ -131,9 +131,11 @@ class AiService
             throw new RuntimeException('AI is not configured.');
         }
 
-        return $this->provider() === 'openai'
-            ? $this->chatOpenAi($system, $user)
-            : $this->chatClaude($system, $user);
+        // Claude uses the native Anthropic Messages API; every other provider
+        // (openai, groq, openrouter, ollama, …) speaks OpenAI chat-completions.
+        return $this->provider() === 'claude'
+            ? $this->chatClaude($system, $user)
+            : $this->chatOpenAiCompatible($system, $user);
     }
 
     protected function chatClaude(string $system, string $user): string
@@ -164,12 +166,18 @@ class AiService
             ->implode('');
     }
 
-    protected function chatOpenAi(string $system, string $user): string
+    protected function chatOpenAiCompatible(string $system, string $user): string
     {
         $d = $this->driver();
 
+        // OpenRouter asks integrators to identify themselves (optional, harmless elsewhere).
+        $headers = $this->provider() === 'openrouter'
+            ? ['HTTP-Referer' => (string) config('app.url'), 'X-Title' => (string) config('app.name')]
+            : [];
+
         $response = Http::timeout((int) config('ai.timeout', 30))
             ->withToken($d['key'])
+            ->withHeaders($headers)
             ->post(rtrim($d['base_url'], '/').'/v1/chat/completions', [
                 'model'       => $d['model'],
                 'max_tokens'  => (int) config('ai.max_tokens', 1024),
@@ -180,7 +188,7 @@ class AiService
             ]);
 
         if ($response->failed()) {
-            throw new RuntimeException('OpenAI request failed: '.$response->json('error.message', $response->status()));
+            throw new RuntimeException(ucfirst($this->provider()).' request failed: '.$response->json('error.message', $response->status()));
         }
 
         return (string) $response->json('choices.0.message.content', '');

@@ -7,7 +7,10 @@ return [
     | AI provider
     |--------------------------------------------------------------------------
     | Which provider powers Streakly's AI features (natural-language logging,
-    | weekly insights, smart suggestions). Set to "claude" or "openai".
+    | weekly insights, smart suggestions). One of: claude, openai, groq,
+    | openrouter, ollama. Every provider except "claude" speaks the
+    | OpenAI-compatible chat-completions API, so free/open-source backends
+    | (Groq, OpenRouter, Ollama, Together, …) work out of the box.
     | Leave the matching API key blank to silently disable all AI features —
     | the UI hides itself when no key is configured.
     */
@@ -36,6 +39,29 @@ return [
             'key'      => env('OPENAI_API_KEY'),
             'model'    => env('OPENAI_MODEL', 'gpt-4o-mini'),
             'base_url' => env('OPENAI_BASE_URL', 'https://api.openai.com'),
+        ],
+
+        // Groq — free, fast, open models (Llama, etc.). Key: https://console.groq.com/keys
+        'groq' => [
+            'key'      => env('GROQ_API_KEY'),
+            'model'    => env('GROQ_MODEL', 'llama-3.3-70b-versatile'),
+            'base_url' => env('GROQ_BASE_URL', 'https://api.groq.com/openai'),
+        ],
+
+        // OpenRouter — aggregates many models, including free ":free" variants.
+        // Key: https://openrouter.ai/keys
+        'openrouter' => [
+            'key'      => env('OPENROUTER_API_KEY'),
+            'model'    => env('OPENROUTER_MODEL', 'meta-llama/llama-3.3-70b-instruct:free'),
+            'base_url' => env('OPENROUTER_BASE_URL', 'https://openrouter.ai/api'),
+        ],
+
+        // Ollama — 100% local & offline, no key, no internet. https://ollama.com
+        // The placeholder key just keeps the feature "enabled"; Ollama ignores auth.
+        'ollama' => [
+            'key'      => env('OLLAMA_API_KEY', 'ollama'),
+            'model'    => env('OLLAMA_MODEL', 'llama3.2'),
+            'base_url' => env('OLLAMA_BASE_URL', 'http://localhost:11434'),
         ],
 
     ],

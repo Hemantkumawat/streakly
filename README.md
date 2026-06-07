@@ -49,15 +49,48 @@ Config (in `.env`):
 
 ## ✨ AI configuration
 
-AI is **off by default**. To enable it, pick a provider and add its key to `.env`:
+AI is **off by default** and **provider-agnostic**. Pick one provider via
+`AI_PROVIDER`, add its key to `.env`, and reload. Every provider except Claude
+speaks the OpenAI-compatible chat API, so **free / open-source backends work
+out of the box**.
+
+### Free & open-source options (no cost)
+
+**Groq (recommended)** — free, fast, runs open models (Llama 3.3). Grab a key (no
+credit card) at <https://console.groq.com/keys>:
 
 ```bash
-# Anthropic Claude (default)
+AI_PROVIDER=groq
+GROQ_API_KEY=gsk_...
+GROQ_MODEL=llama-3.3-70b-versatile
+```
+
+**OpenRouter** — many free `:free` models. Key at <https://openrouter.ai/keys>:
+
+```bash
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=meta-llama/llama-3.3-70b-instruct:free
+```
+
+**Ollama** — 100% local & offline, **no API key**. Install <https://ollama.com>,
+run `ollama pull llama3.2`, then:
+
+```bash
+AI_PROVIDER=ollama
+OLLAMA_MODEL=llama3.2
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+### Paid options (highest quality)
+
+```bash
+# Anthropic Claude
 AI_PROVIDER=claude
 ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-opus-4-8   # or claude-haiku-4-5 for cheaper/faster
+ANTHROPIC_MODEL=claude-opus-4-8     # or claude-haiku-4-5 for cheaper/faster
 
-# …or OpenAI
+# OpenAI
 AI_PROVIDER=openai
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o-mini
@@ -65,17 +98,18 @@ OPENAI_MODEL=gpt-4o-mini
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AI_PROVIDER` | `claude` | Which provider powers AI features: `claude` or `openai` |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | — | Provider API key. Blank ⇒ AI features hidden |
-| `ANTHROPIC_MODEL` | `claude-opus-4-8` | Claude model id (Messages API) |
-| `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI chat model id |
+| `AI_PROVIDER` | `groq` | `groq` · `openrouter` · `ollama` · `claude` · `openai` |
+| `*_API_KEY` | — | Key for the selected provider. Blank ⇒ AI features hidden (Ollama needs none) |
+| `*_MODEL` | per provider | Model id for the selected provider |
 | `AI_TIMEOUT` | `30` | Per-request timeout (seconds) |
 | `AI_MAX_TOKENS` | `1024` | Max output tokens per AI call |
 
 > 🔒 **Never commit your API key.** Keys live only in `.env`, which is git-ignored.
 
-The integration is a thin, dependency-free service (`app/Services/Ai/AiService.php`)
-using Laravel's HTTP client — no provider SDK required. See `tests/Feature/AiServiceTest.php`.
+The integration is a thin, dependency-free service ([`app/Services/Ai/AiService.php`](app/Services/Ai/AiService.php))
+using Laravel's HTTP client — no provider SDK required. Adding another
+OpenAI-compatible backend is just a new entry in [`config/ai.php`](config/ai.php).
+See [`tests/Feature/AiServiceTest.php`](tests/Feature/AiServiceTest.php).
 
 ---
 

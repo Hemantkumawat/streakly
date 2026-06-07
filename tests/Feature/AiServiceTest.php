@@ -52,6 +52,34 @@ class AiServiceTest extends TestCase
             && $request->url() === 'https://api.anthropic.com/v1/messages');
     }
 
+    public function test_it_works_with_a_free_openai_compatible_provider(): void
+    {
+        // Groq (and OpenRouter, Ollama, …) reuse the OpenAI chat-completions shape.
+        config([
+            'ai.provider' => 'groq',
+            'ai.drivers.groq.key' => 'gsk_test',
+            'ai.drivers.groq.base_url' => 'https://api.groq.com/openai',
+        ]);
+
+        Http::fake([
+            'api.groq.com/*' => Http::response([
+                'choices' => [[
+                    'message' => ['content' => '[{"name":"Walk","points":5,"icon":"🚶"}]'],
+                ]],
+            ]),
+        ]);
+
+        $service = app(AiService::class);
+        $this->assertTrue($service->enabled());
+
+        $result = $service->parseActivities('went for a walk');
+
+        $this->assertSame([['name' => 'Walk', 'points' => 5, 'icon' => '🚶']], $result);
+
+        Http::assertSent(fn ($request) => $request->hasHeader('Authorization', 'Bearer gsk_test')
+            && $request->url() === 'https://api.groq.com/openai/v1/chat/completions');
+    }
+
     public function test_it_tolerates_code_fences_in_suggestions_from_openai(): void
     {
         config([
