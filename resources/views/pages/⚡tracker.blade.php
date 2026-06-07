@@ -17,6 +17,9 @@ new #[Title('Activity Tracker')] class extends Component {
     /** Day currently being viewed/edited (Y-m-d). */
     public string $selectedDate;
 
+    /** Calendar year shown in the activity heatmap. */
+    public int $year;
+
     /** Custom one-off activity form. */
     #[Validate('required|string|max:80')]
     public string $customName = '';
@@ -39,9 +42,13 @@ new #[Title('Activity Tracker')] class extends Component {
     /** @var array<int,array{name:string,points:int,icon:string}> */
     public array $aiSuggestions = [];
 
+    /** Date whose logs are shown in the heatmap day-detail popup (null = closed). */
+    public ?string $heatmapDate = null;
+
     public function mount(): void
     {
         $this->selectedDate = Carbon::today()->toDateString();
+        $this->year = (int) Carbon::today()->year;
     }
 
     /** The configured daily target. */
@@ -59,6 +66,37 @@ new #[Title('Activity Tracker')] class extends Component {
         return DB::table('activity_logs')
             ->where('user_id', Auth::id())
             ->whereDate('log_date', '>=', $start)
+            ->groupByRaw('DATE(log_date)')
+            ->selectRaw('DATE(log_date) as d, SUM(points) as pts')
+            ->pluck('pts', 'd')
+            ->map(fn ($p) => (int) $p)
+            ->all();
+    }
+
+    /** Years the user has data for (descending), always including the current year. */
+    #[Computed]
+    public function availableYears(): array
+    {
+        $earliest = DB::table('activity_logs')
+            ->where('user_id', Auth::id())
+            ->min('log_date');
+
+        $startYear = $earliest ? (int) Carbon::parse($earliest)->year : (int) Carbon::today()->year;
+        $endYear   = (int) Carbon::today()->year;
+
+        return range($endYear, min($startYear, $endYear));
+    }
+
+    /** Date => total points for the selected calendar year. */
+    #[Computed]
+    public function yearDays(): array
+    {
+        $start = sprintf('%04d-01-01', $this->year);
+        $end   = sprintf('%04d-12-31', $this->year);
+
+        return DB::table('activity_logs')
+            ->where('user_id', Auth::id())
+            ->whereBetween('log_date', [$start, $end])
             ->groupByRaw('DATE(log_date)')
             ->selectRaw('DATE(log_date) as d, SUM(points) as pts')
             ->pluck('pts', 'd')
@@ -144,31 +182,40 @@ new #[Title('Activity Tracker')] class extends Component {
     }
 
     /**
-     * Heatmap data: columns of weeks (each 7 day-cells), month labels aligned
-     * to the week a month begins in, and a human range for the card heading.
+     * Heatmap data for the selected calendar year: columns of weeks (each 7
+     * day-cells), month labels, and that year's point/active-day totals.
      *
-     * @return array{weeks:array<int,array{month:string,days:array}>,range:string}
+     * @return array{weeks:array<int,array{month:string,days:array}>,year:int,total:int,active:int}
      */
     #[Computed]
     public function heatmap(): array
     {
-        $days  = $this->days;
+        $days  = $this->yearDays;
         $today = Carbon::today();
-        $start = $today->copy()->subWeeks(52)->startOfWeek(Carbon::SUNDAY);
+        $year  = $this->year;
+
+        // Full calendar year — future days are shown muted/disabled, not clickable.
+        $start = Carbon::create($year, 1, 1)->startOfWeek(Carbon::SUNDAY);
+        $end   = Carbon::create($year, 12, 31);
 
         $weeks = [];
         $week = [];
         $prevMonth = null;
 
-        for ($d = $start->copy(); $d->lte($today); $d->addDay()) {
-            $key = $d->toDateString();
-            $pts = (int) ($days[$key] ?? 0);
+        for ($d = $start->copy(); $d->lte($end); $d->addDay()) {
+            $key    = $d->toDateString();
+            $inYear = (int) $d->year === $year;       // leading days belong to Dec of the prior year
+            $future = $inYear && $d->gt($today);
+            $pts    = ($inYear && ! $future) ? (int) ($days[$key] ?? 0) : 0;
+
             $week[] = [
-                'date'  => $key,
-                'pts'   => $pts,
-                'level' => $this->levelFor($pts),
-                'today' => $key === $today->toDateString(),
-                'label' => $d->format('M j, Y'),
+                'date'   => $key,
+                'pts'    => $pts,
+                'level'  => ($inYear && ! $future) ? $this->levelFor($pts) : 0,
+                'today'  => $key === $today->toDateString(),
+                'label'  => $d->format('M j, Y'),
+                'muted'  => ! $inYear,
+                'future' => $future,
             ];
 
             if (count($week) === 7) {
@@ -183,9 +230,47 @@ new #[Title('Activity Tracker')] class extends Component {
         }
 
         return [
-            'weeks' => $weeks,
-            'range' => $start->format('M Y').' – '.$today->format('M Y'),
+            'weeks'  => $weeks,
+            'year'   => $year,
+            'total'  => array_sum($days),
+            'active' => count(array_filter($days, fn ($p) => $p > 0)),
         ];
+    }
+
+    /** Step the heatmap year within the available range. */
+    public function changeYear(int $delta): void
+    {
+        $years = $this->availableYears;
+        $new   = $this->year + $delta;
+
+        if ($new >= min($years) && $new <= max($years)) {
+            $this->year = $new;
+            unset($this->yearDays, $this->heatmap);
+        }
+    }
+
+    /** Logs for the date shown in the heatmap day-detail popup. */
+    #[Computed]
+    public function heatmapDayLogs()
+    {
+        if (! $this->heatmapDate) {
+            return collect();
+        }
+
+        return ActivityLog::where('user_id', Auth::id())
+            ->whereDate('log_date', $this->heatmapDate)
+            ->orderBy('id')
+            ->get();
+    }
+
+    /** Open the heatmap day-detail modal for a given date. */
+    public function showDayDetail(string $date): void
+    {
+        if (Carbon::hasFormat($date, 'Y-m-d')) {
+            $this->heatmapDate = $date;
+            unset($this->heatmapDayLogs);
+            Flux::modal('day-detail')->show();
+        }
     }
 
     /** Attach a month label only on the first week of each new month. */
@@ -410,7 +495,7 @@ new #[Title('Activity Tracker')] class extends Component {
 
     private function refreshData(): void
     {
-        unset($this->days, $this->dayLogs, $this->stats, $this->heatmap);
+        unset($this->days, $this->dayLogs, $this->stats, $this->heatmap, $this->yearDays, $this->heatmapDayLogs);
     }
 }; ?>
 
@@ -487,7 +572,7 @@ new #[Title('Activity Tracker')] class extends Component {
                         </span>
                         <button wire:click="deleteLog({{ $log->id }})"
                                 wire:confirm="Remove this entry?"
-                                class="text-neutral-400 hover:text-red-500" title="Remove">✕</button>
+                                class="cursor-pointer text-neutral-400 hover:text-red-500" title="Remove">✕</button>
                     </div>
                 @empty
                     <p class="py-2 text-sm text-neutral-500 dark:text-neutral-400">{{ __('No activities logged for this day yet.') }}</p>
@@ -499,7 +584,7 @@ new #[Title('Activity Tracker')] class extends Component {
             <div class="flex flex-wrap gap-2">
                 @foreach ($this->types as $type)
                     <button wire:key="quick-{{ $type->id }}" wire:click="addType({{ $type->id }})"
-                            class="inline-flex items-center gap-1.5 rounded-full border border-neutral-300 bg-white px-3 py-1.5 text-sm hover:border-green-500 dark:border-neutral-600 dark:bg-neutral-800">
+                            class="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-neutral-300 bg-white px-3 py-1.5 text-sm hover:border-green-500 dark:border-neutral-600 dark:bg-neutral-800">
                         <span>{{ $type->icon }}</span>
                         <span>{{ $type->name }}</span>
                         <span class="text-xs text-neutral-400">+{{ $type->points }}</span>
@@ -532,12 +617,30 @@ new #[Title('Activity Tracker')] class extends Component {
         </div>
 
         {{-- Heatmap --}}
+        @php($hm = $this->heatmap)
+        @php($years = $this->availableYears)
         <div class="rounded-xl border border-neutral-200 bg-white p-5 dark:border-neutral-700 dark:bg-neutral-900">
-            <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <flux:heading size="lg">{{ __('Activity') }}</flux:heading>
-                <span class="text-sm text-neutral-500 dark:text-neutral-400">
-                    {{ $this->heatmap['range'] }} · {{ $s['total'] }} {{ __('pts') }}
-                </span>
+            <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                    <flux:heading size="lg">{{ __('Activity') }}</flux:heading>
+                    <span class="text-sm text-neutral-500 dark:text-neutral-400">
+                        {{ $hm['total'] }} {{ __('pts') }} · {{ $hm['active'] }} {{ __('active days') }} {{ __('in') }} {{ $hm['year'] }}
+                    </span>
+                </div>
+
+                {{-- Year navigation --}}
+                <div class="flex items-center gap-1">
+                    <flux:button size="sm" variant="ghost" wire:click="changeYear(-1)"
+                        :disabled="$year <= min($years)" aria-label="{{ __('Previous year') }}">‹</flux:button>
+                    <select wire:model.live="year"
+                        class="rounded-lg border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-600">
+                        @foreach ($years as $y)
+                            <option value="{{ $y }}">{{ $y }}</option>
+                        @endforeach
+                    </select>
+                    <flux:button size="sm" variant="ghost" wire:click="changeYear(1)"
+                        :disabled="$year >= max($years)" aria-label="{{ __('Next year') }}">›</flux:button>
+                </div>
             </div>
 
             @php($palette = [
@@ -570,12 +673,21 @@ new #[Title('Activity Tracker')] class extends Component {
                         @foreach ($this->heatmap['weeks'] as $week)
                             <div wire:key="week-{{ $loop->index }}" class="flex flex-col gap-[3px]">
                                 @foreach ($week['days'] as $cell)
-                                    <button type="button"
-                                        wire:key="cell-{{ $cell['date'] }}"
-                                        wire:click="pickDate('{{ $cell['date'] }}')"
-                                        title="{{ $cell['label'] }} — {{ $cell['pts'] }} pts"
-                                        class="h-3.5 w-3.5 rounded-[3px] {{ $palette[$cell['level']] }} {{ $cell['today'] ? 'ring-1 ring-neutral-900 dark:ring-white' : '' }} {{ $cell['date'] === $selectedDate ? 'ring-2 ring-blue-500' : '' }}">
-                                    </button>
+                                    @if ($cell['muted'])
+                                        <div class="h-3.5 w-3.5" aria-hidden="true"></div>
+                                    @elseif ($cell['future'])
+                                        <div wire:key="cell-{{ $cell['date'] }}"
+                                            title="{{ $cell['label'] }} — {{ __('future') }}"
+                                            aria-hidden="true"
+                                            class="h-3.5 w-3.5 cursor-not-allowed rounded-[3px] bg-[#ebedf0] opacity-25 dark:bg-[#161b22]"></div>
+                                    @else
+                                        <button type="button"
+                                            wire:key="cell-{{ $cell['date'] }}"
+                                            wire:click="showDayDetail('{{ $cell['date'] }}')"
+                                            title="{{ $cell['label'] }}{{ $cell['pts'] > 0 ? ' — '.$cell['pts'].' pts' : '' }}"
+                                            class="h-3.5 w-3.5 cursor-pointer rounded-[3px] transition-transform hover:scale-125 {{ $palette[$cell['level']] }} {{ $cell['today'] ? 'ring-1 ring-neutral-900 dark:ring-white' : '' }} {{ $cell['date'] === $heatmapDate ? 'ring-2 ring-blue-500' : '' }}">
+                                        </button>
+                                    @endif
                                 @endforeach
                             </div>
                         @endforeach
@@ -613,7 +725,7 @@ new #[Title('Activity Tracker')] class extends Component {
                 <div class="mb-4 flex flex-wrap gap-2">
                     @foreach ($this->aiSuggestions as $i => $sug)
                         <button wire:key="sug-{{ $i }}" wire:click="addSuggestion({{ $i }})"
-                                class="inline-flex items-center gap-1.5 rounded-full border border-dashed border-orange-400 bg-orange-50 px-3 py-1.5 text-sm hover:bg-orange-100 dark:border-orange-700 dark:bg-orange-950/30 dark:hover:bg-orange-950/50">
+                                class="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-dashed border-orange-400 bg-orange-50 px-3 py-1.5 text-sm hover:bg-orange-100 dark:border-orange-700 dark:bg-orange-950/30 dark:hover:bg-orange-950/50">
                             <span>{{ $sug['icon'] }}</span>
                             <span>{{ $sug['name'] }}</span>
                             <span class="text-xs text-neutral-400">+{{ $sug['points'] }}</span>
@@ -640,8 +752,8 @@ new #[Title('Activity Tracker')] class extends Component {
                         <span class="text-lg">{{ $type->icon ?: '•' }}</span>
                         <span class="flex-1">{{ $type->name }}</span>
                         <span class="text-sm text-neutral-500">+{{ $type->points }}</span>
-                        <button wire:click="editType({{ $type->id }})" class="text-neutral-400 hover:text-blue-500" title="Edit">✎</button>
-                        <button wire:click="deleteType({{ $type->id }})" wire:confirm="Archive this activity?" class="text-neutral-400 hover:text-red-500" title="Archive">🗑</button>
+                        <button wire:click="editType({{ $type->id }})" class="cursor-pointer text-neutral-400 hover:text-blue-500" title="Edit">✎</button>
+                        <button wire:click="deleteType({{ $type->id }})" wire:confirm="Archive this activity?" class="cursor-pointer text-neutral-400 hover:text-red-500" title="Archive">🗑</button>
                     </div>
                 @endforeach
             </div>
@@ -655,6 +767,64 @@ new #[Title('Activity Tracker')] class extends Component {
                 {{ __('Your data lives in your database and syncs across every device you log in from.') }}
             </p>
         </div>
+
+        {{-- ── Heatmap day-detail popup ──────────────────────────────────── --}}
+        <flux:modal name="day-detail" class="w-full max-w-sm" focusable>
+            @if ($heatmapDate)
+                @php($hmDate  = \Illuminate\Support\Carbon::parse($heatmapDate))
+                @php($hmLogs  = $this->heatmapDayLogs)
+                @php($hmTotal = (int) $hmLogs->sum('points'))
+
+                {{-- Header --}}
+                <div class="mb-4">
+                    <flux:heading size="lg">
+                        {{ $hmDate->format('l') }}<span class="font-normal text-neutral-400">, {{ $hmDate->format('M j, Y') }}</span>
+                    </flux:heading>
+                    <p class="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+                        @if ($hmDate->isToday())
+                            <span class="font-semibold text-green-600 dark:text-green-400">{{ __('Today') }}</span> ·
+                        @endif
+                        {{ $hmTotal }} {{ __('pts') }}
+                        @if ($hmLogs->count() > 0)
+                            · {{ $hmLogs->count() }} {{ $hmLogs->count() === 1 ? __('activity') : __('activities') }}
+                        @endif
+                    </p>
+                </div>
+
+                {{-- Log list --}}
+                @if ($hmLogs->isNotEmpty())
+                    <div class="mb-5 flex flex-col gap-2">
+                        @foreach ($hmLogs as $log)
+                            <div class="flex items-center gap-3 rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm dark:border-neutral-700 dark:bg-neutral-800/60">
+                                <span class="text-base leading-none">{{ $log->type?->icon ?: '•' }}</span>
+                                <span class="flex-1">{{ $log->name }}</span>
+                                <span class="rounded-md bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700 dark:bg-green-900/40 dark:text-green-300">
+                                    +{{ $log->points }}
+                                </span>
+                            </div>
+                        @endforeach
+                    </div>
+                @else
+                    <div class="mb-5 rounded-lg bg-neutral-50 py-8 text-center dark:bg-neutral-800/40">
+                        <div class="mb-2 text-3xl opacity-40">📭</div>
+                        <p class="text-sm text-neutral-400 dark:text-neutral-500">{{ __('No activities logged on this day.') }}</p>
+                    </div>
+                @endif
+
+                {{-- Actions --}}
+                <div class="flex gap-2">
+                    <flux:modal.close class="flex-1">
+                        <flux:button variant="primary" class="w-full cursor-pointer"
+                            wire:click="pickDate('{{ $heatmapDate }}')">
+                            {{ __('Edit this day') }} →
+                        </flux:button>
+                    </flux:modal.close>
+                    <flux:modal.close>
+                        <flux:button variant="ghost" class="cursor-pointer">{{ __('Close') }}</flux:button>
+                    </flux:modal.close>
+                </div>
+            @endif
+        </flux:modal>
 
     </div>
 </div>
